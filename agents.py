@@ -1,307 +1,322 @@
+
 # agents.py
 
 import os
 import json
+from pathlib import Path
+
 from dotenv import load_dotenv
-from langchain_together import ChatTogether
-from langchain_tavily import TavilySearch
+from langchain_groq import ChatGroq
+from ddgs import DDGS
+
 from prompts import (
     supervisor_prompt_template,
     researcher_prompt_template,
     writer_prompt_template,
-    critique_prompt_template
+    critique_prompt_template,
 )
 
-# Load environment variables
-load_dotenv()
-import getpass
-import os
+# --------------------------------------------------
+# 1. Load Environment Variables
+# --------------------------------------------------
 
-if not os.environ.get("TAVILY_API_KEY"):
-    os.environ["TAVILY_API_KEY"] = getpass.getpass("Tavily API key:\n")
+PROJECT_DIR = Path(__file__).resolve().parent
+load_dotenv(PROJECT_DIR / ".env")
 
-# --- 1. Setup LLM and Tools ---
+# --------------------------------------------------
+# 2. Initialize LLM
+# --------------------------------------------------
 
-# Initialize the ChatTogether LLM (latest non-deprecated version)
-llm = ChatTogether(
-    model="mistralai/Mixtral-8x7B-Instruct-v0.1",
+if not os.getenv("GROQ_API_KEY"):
+    raise EnvironmentError(
+        "GROQ_API_KEY is missing. Add it to your project's .env file."
+    )
+
+llm = ChatGroq(
+    model="openai/gpt-oss-120b",
     temperature=0.3,
     max_tokens=4096,
-    together_api_key=os.environ.get("TOGETHER_API_KEY")
 )
 
-# Initialize the Tavily Search Tool (official method from docs)
-tavily_tool = TavilySearch(
-    max_results=5,
-    topic="general",
-    include_answer=False,
-    include_raw_content=False,
-    search_depth="basic"
-)
-
+# --------------------------------------------------
+# 3. Common LLM Helper
+# --------------------------------------------------
 
 def _call_llm(llm_obj, *args, **kwargs):
-    """Helper to call LLM or tool objects that may expose different APIs.
+    """Invoke an LLM or another compatible callable."""
 
-    Tries common method names in order: invoke, run, __call__.
-    This increases compatibility across LangChain versions.
-    """
-    # prefer invoke
-    if hasattr(llm_obj, "invoke") and callable(getattr(llm_obj, "invoke")):
+    if hasattr(llm_obj, "invoke"):
         return llm_obj.invoke(*args, **kwargs)
-    # fallback to run
-    if hasattr(llm_obj, "run") and callable(getattr(llm_obj, "run")):
+
+    if hasattr(llm_obj, "run"):
         return llm_obj.run(*args, **kwargs)
-    # last resort: call object directly if callable
+
     if callable(llm_obj):
         return llm_obj(*args, **kwargs)
-    # Not callable
-    raise AttributeError("LLM/tool object has no invoke/run and is not callable")
 
-# --- 2. Create Agent Nodes ---
+    raise AttributeError("Object has no supported invocation method.")
 
-# ----------------- #
-# SUPERVISOR NODE   #
-# ----------------- #
+
+def _response_text(response):
+    """Extract text from an LLM response."""
+
+    content = getattr(response, "content", response)
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        return "\n".join(
+            item.get("text", str(item))
+            if isinstance(item, dict)
+            else str(item)
+            for item in content
+        )
+
+    return str(content)
+
+
+# --------------------------------------------------
+# 4. DuckDuckGo Search
+# --------------------------------------------------
+
+def search_web(query, max_results=5):
+    """Search the web without a paid search API key."""
+
+    with DDGS() as ddgs:
+        return list(
+            ddgs.text(query, max_results=max_results)
+        )
+
+
+# --------------------------------------------------
+# 5. Supervisor
+# --------------------------------------------------
+
 def create_supervisor_chain():
-    """Creates the supervisor decision chain."""
+    """Decide which agent should execute next."""
+
     def supervisor_invoke(state):
         research = state.get("research_findings", [])
         research_text = "\n---\n".join(research) if research else "No research yet."
-        
-        # Get state info
+
         revision = state.get("revision_number", 0)
-        has_research = len(research) > 0
+        has_research = bool(research)
         has_draft = bool(state.get("draft", "").strip())
         critique = state.get("critique_notes", "")
-        
-        # Deterministic decision logic FIRST (before calling LLM)
-        # This ensures consistent workflow progression
-        
-        # 1. If critique says APPROVED, we're done
+
         if "APPROVED" in critique.upper() and has_draft:
-            print("Supervisor: Draft approved, ending workflow")
             return {
                 "next_step": "END",
-                "task_description": "Report approved and complete"
+                "task_description": "Report approved and complete",
             }
-        
-        # 2. If no research yet, start with research
+
         if not has_research:
-            print("Supervisor: No research yet, directing to researcher")
             return {
                 "next_step": "researcher",
-                "task_description": f"Research the topic: {state.get('main_task', '')}"
+                "task_description": f"Research the topic: {state.get('main_task', '')}",
             }
-        
-        # 3. If we have research but no draft, create first draft
+
         if has_research and not has_draft:
-            print("Supervisor: Have research, creating first draft")
             return {
                 "next_step": "writer",
-                "task_description": "Write the first draft based on research findings"
+                "task_description": "Write the first draft based on research findings",
             }
-        
-        # 4. If we have a draft but no critique yet, send to critiquer
+
         if has_draft and not critique:
-            print("Supervisor: Have draft, sending to critiquer")
-            return {
-                "next_step": "writer",  # This will trigger write -> critique flow
-                "task_description": "Prepare draft for critique"
-            }
-        
-        # 5. If we have critique with feedback (not approved), revise
-        if critique and "APPROVED" not in critique.upper() and revision < 3:
-            print(f"Supervisor: Revision {revision}, sending back to writer")
             return {
                 "next_step": "writer",
-                "task_description": "Revise the draft based on critique feedback"
+                "task_description": "Prepare draft for critique",
             }
-        
-        # 6. Max revisions reached
+
+        if critique and "APPROVED" not in critique.upper() and revision < 3:
+            return {
+                "next_step": "writer",
+                "task_description": "Revise the draft based on critique feedback",
+            }
+
         if revision >= 3:
-            print("Supervisor: Max revisions reached, ending")
             return {
                 "next_step": "END",
-                "task_description": "Maximum revisions reached, finalizing report"
+                "task_description": "Maximum revisions reached",
             }
-        
-        # 7. Try LLM decision as fallback
+
         prompt = supervisor_prompt_template.format(
             main_task=state.get("main_task", ""),
             research_findings=research_text,
             draft=state.get("draft", "No draft yet."),
-            critique_notes=critique if critique else "No critique yet.",
-            revision_number=revision
+            critique_notes=critique or "No critique yet.",
+            revision_number=revision,
         )
-        
+
         try:
             response = _call_llm(llm, prompt)
-            content = response.content if hasattr(response, 'content') else str(response)
-            
-            # Try to parse JSON
-            text = content.strip()
-            if text.startswith("```"):
-                lines = text.split("\n")
-                text = "\n".join([l for l in lines if not l.strip().startswith("```")])
-            text = text.strip()
-            
-            decision = json.loads(text)
-            
-            if "next_step" in decision:
+            content = _response_text(response).strip()
+
+            if content.startswith("```"):
+                lines = content.splitlines()
+                content = "\n".join(
+                    line for line in lines
+                    if not line.strip().startswith("```")
+                ).strip()
+
+            decision = json.loads(content)
+
+            if decision.get("next_step") in {
+                "researcher", "writer", "END"
+            }:
                 return decision
-            
-        except Exception as e:
-            print(f"LLM parsing error: {e}")
-        
-        # 8. Final fallback - continue with writer
-        print("Supervisor: Using final fallback - continuing with writer")
+
+        except Exception as exc:
+            print(f"Supervisor parsing error: {exc}")
+
         return {
             "next_step": "writer",
-            "task_description": "Continue with draft creation"
+            "task_description": "Continue with draft creation",
         }
-    
+
     return supervisor_invoke
 
-# ----------------- #
-# RESEARCHER NODE   #
-# ----------------- #
+
+# --------------------------------------------------
+# 6. Researcher
+# --------------------------------------------------
+
 def create_researcher_agent():
-    """Creates a researcher agent that uses search."""
-    
+    """Search with DuckDuckGo and summarize with Groq."""
+
     def researcher_invoke(input_dict):
-        """Execute research using Tavily search."""
-        query = input_dict.get("input", "")
-        
-        if not query or query in ["Continue work", "Complete"]:
+        query = input_dict.get("input", "").strip()
+
+        if not query or query in {"Continue work", "Complete"}:
             query = "General research information"
-        
+
         print(f"Researching: {query}")
-        
+
         try:
-            # Use the tavily tool
-            if hasattr(tavily_tool, "invoke"):
-                search_response = tavily_tool.invoke({"query": query})
-            elif callable(tavily_tool):
-                search_response = tavily_tool({"query": query})
-            else:
-                if hasattr(tavily_tool, "run"):
-                    search_response = tavily_tool.run({"query": query})
-                elif hasattr(tavily_tool, "_run"):
-                    search_response = tavily_tool._run(query)
-                else:
-                    raise AttributeError("Tavily tool object has no invoke/run/_run or callable")
-            
-            # Parse the response
-            if isinstance(search_response, str):
-                import json
-                try:
-                    search_data = json.loads(search_response)
-                    results = search_data.get('results', [])
-                except json.JSONDecodeError:
-                    results = []
-                    raw_output = search_response
-            elif isinstance(search_response, dict):
-                results = search_response.get('results', [])
-            else:
-                results = []
-                raw_output = str(search_response)
-            
-            # Format the results
+            results = search_web(query, max_results=5)
+
+            if not results:
+                return {
+                    "output": f"No web results found for: {query}",
+                    "input": query,
+                }
+
             formatted_results = []
-            
-            if results:
-                for result in results[:3]:
-                    title = result.get('title', 'Untitled')
-                    url = result.get('url', 'N/A')
-                    content = result.get('content', '')
-                    formatted_results.append(f"**{title}**\nSource: {url}\n{content[:300]}...\n")
-                
-                raw_output = "\n---\n".join(formatted_results)
-            elif not raw_output:
-                raw_output = "No results found"
-            
-            # Summarize with LLM
-            summary_prompt = f"""Based on these search results about "{query}", provide a concise summary of key findings (5-7 bullet points):
 
+            for result in results:
+                title = result.get("title", "Untitled")
+                url = result.get("href", "N/A")
+                body = result.get("body", "")
+
+                formatted_results.append(
+                    f"Title: {title}\n"
+                    f"Source: {url}\n"
+                    f"Content: {body}\n"
+                )
+
+            raw_output = "\n---\n".join(formatted_results)
+
+            summary_prompt = f"""
+You are a careful research assistant.
+
+Research topic: {query}
+
+Summarize the following web search results in 5-7
+useful bullet points.
+
+Rules:
+- Use only information supported by the results.
+- Do not invent facts, statistics, or citations.
+- Include relevant source URLs.
+- Mention when the available information is insufficient.
+
+Search results:
 {raw_output}
+"""
 
-Format as clear bullet points with the most important information."""
+            response = _call_llm(llm, summary_prompt)
+            summary = _response_text(response)
 
-            try:
-                summary_response = _call_llm(llm, summary_prompt)
-                summary = summary_response.content if hasattr(summary_response, 'content') else str(summary_response)
-            except Exception as e:
-                print(f"Summarization error: {e}")
-                summary = raw_output
-            
             return {
-                "output": summary if summary else raw_output,
-                "input": query
+                "output": summary or raw_output,
+                "input": query,
             }
-            
-        except Exception as e:
-            print(f"Research error: {e}")
-            return {
-                "output": f"Research completed on: {query}. Key information has been gathered from web sources.",
-                "input": query
-            }
-    
+
+        except Exception as exc:
+            print(f"Research error: {exc}")
+            raise RuntimeError(
+                f"Research failed for '{query}': {exc}"
+            ) from exc
+
     return researcher_invoke
 
-# ----------------- #
-# WRITER NODE       #
-# ----------------- #
+
+# --------------------------------------------------
+# 7. Writer
+# --------------------------------------------------
+
 def create_writer_chain():
-    """Creates the writer chain."""
+    """Create or revise the research report."""
+
     def writer_invoke(state):
         research = state.get("research_findings", [])
         research_text = "\n\n".join(research) if research else "No research available."
-        
+
         prompt = writer_prompt_template.format(
             main_task=state.get("main_task", ""),
             research_findings=research_text,
             draft=state.get("draft", ""),
-            critique_notes=state.get("critique_notes", "")
+            critique_notes=state.get("critique_notes", ""),
         )
-        
+
         try:
             response = _call_llm(llm, prompt)
-            content = response.content if hasattr(response, 'content') else str(response)
-            return content if content else "Draft in progress..."
-        except Exception as e:
-            print(f"Writer error: {e}")
-            return "Error generating draft. Please try again."
-    
+            content = _response_text(response)
+
+            return content or "Draft in progress..."
+
+        except Exception as exc:
+            print(f"Writer error: {exc}")
+            raise RuntimeError(
+                f"Could not generate the report: {exc}"
+            ) from exc
+
     return writer_invoke
 
-# ----------------- #
-# CRITIQUE NODE     #
-# ----------------- #
+
+# --------------------------------------------------
+# 8. Critiquer
+# --------------------------------------------------
+
 def create_critique_chain():
-    """Creates the critique chain."""
+    """Review the draft and provide revision feedback."""
+
     def critique_invoke(state):
         draft = state.get("draft", "")
         revision_num = state.get("revision_number", 0)
-        
-        # Safety checks
+
         if len(draft.strip()) < 100:
             return "APPROVED - Draft is minimal but acceptable."
-        
+
         if revision_num >= 3:
-            return "APPROVED - Maximum revisions reached. The report is satisfactory."
-        
+            return "APPROVED - Maximum revisions reached."
+
         prompt = critique_prompt_template.format(
             main_task=state.get("main_task", ""),
-            draft=draft
+            draft=draft,
         )
-        
+
         try:
             response = _call_llm(llm, prompt)
-            content = response.content if hasattr(response, 'content') else str(response)
-            return content if content else "APPROVED"
-        except Exception as e:
-            print(f"Critique error: {e}")
-            return "APPROVED - Error in critique, proceeding with current draft."
-    
+            content = _response_text(response)
+
+            return content or "APPROVED"
+
+        except Exception as exc:
+            print(f"Critique error: {exc}")
+            raise RuntimeError(
+                f"Could not review the report: {exc}"
+            ) from exc
+
     return critique_invoke

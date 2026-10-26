@@ -20,5 +20,4 @@ var/
 *.egg-info/
 .installed.cfg
 *.egg
-
-#~\homechef-venv\Scripts\Activate.ps1
+.streamlit/secrets.toml

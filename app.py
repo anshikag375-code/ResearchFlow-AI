@@ -1,316 +1,362 @@
-# app.py
-# Author: Amit Kumar | MSc Data Science, University of Westminster
-# LinkedIn: https://www.linkedin.com/in/amitkumar1454/
+
+import os
+import re
+import time
+from pathlib import Path
 
 import streamlit as st
-import os
 from dotenv import load_dotenv
-from graph import app
-import time
+from graph import app as research_graph
 
-# Load environment variables
-load_dotenv()
 
-# --- Page Configuration ---
+# --------------------------------------------------
+# 1. Load environment variables
+# --------------------------------------------------
+PROJECT_DIR = Path(__file__).resolve().parent
+load_dotenv(PROJECT_DIR / ".env")
+
+
+def get_secret(name: str) -> str:
+    """Read a secret from environment variables or Streamlit secrets."""
+    value = os.getenv(name, "").strip()
+
+    if value:
+        return value
+
+    try:
+        value = str(st.secrets.get(name, "")).strip()
+        return value
+    except Exception:
+        return ""
+
+
+# --------------------------------------------------
+# 2. Page configuration
+# --------------------------------------------------
 st.set_page_config(
-    page_title="Research Assistant | Amit Kumar",
+    page_title="ResearchFlow AI",
     page_icon="🧠",
-    layout="wide"
+    layout="wide",
 )
 
-# --- Check for API Keys ---
-def check_api_keys():
-    """Check if required API keys are present."""
-    together_key = os.environ.get("TOGETHER_API_KEY")
-    tavily_key = os.environ.get("TAVILY_API_KEY")
-    
-    if not together_key or not tavily_key:
-        st.error("🚨 API keys not found! Please set TOGETHER_API_KEY and TAVILY_API_KEY in your .env file.")
-        return False
-    
-    st.success("✅ API keys loaded successfully.")
-    return True
+st.title("🧠 ResearchFlow AI")
 
-# --- Header ---
-st.title("Multi-Agent Research Assistant 🧠")
-st.markdown("""
-**Built by [Amit Kumar](https://www.linkedin.com/in/amitkumar1454/) — MSc Data Science, University of Westminster**
+st.markdown(
+    """
+    ### Multi-Agent Research Assistant
 
-An autonomous multi-agent pipeline built with LangGraph. Enter any research topic and a team of specialised AI agents will collaborate — researching, writing and critiquing — until a polished report is produced.
+    Enter a research topic and let a team of AI agents
+    research, write, and critique a report.
 
-**Agent Pipeline:**
-- 🎯 **Supervisor** — orchestrates the workflow via conditional routing
-- 🔍 **Researcher** — retrieves and summarises real-time web intelligence
-- ✍️ **Writer** — drafts structured, evidence-grounded reports
-- 🔎 **Critiquer** — reviews quality across 5 dimensions and drives revisions
-""")
+    **Technology:** Streamlit, LangGraph, LangChain, Groq,
+    and DuckDuckGo Search.
+
+    **Workflow:** Supervisor → Researcher → Writer → Critiquer
+    """
+)
 
 st.divider()
 
 
-# --- Check API Keys ---
-if not check_api_keys():
+# --------------------------------------------------
+# 3. Check Groq API key
+# --------------------------------------------------
+groq_key = get_secret("GROQ_API_KEY")
+
+if not groq_key:
+    st.error("GROQ_API_KEY is missing.")
+
+    st.markdown(
+        """
+        Create a `.env` file in the same folder as `app.py`
+        and add your Groq API key:
+
+        ```env
+        GROQ_API_KEY=your_groq_api_key
+        ```
+
+        Save the file and restart the application.
+        """
+    )
+
     st.stop()
 
-# --- Main Application ---
-st.header("🚀 Start Your Research")
 
-# User input
-topic = st.text_input(
-    "Enter your research topic:",
-    placeholder="e.g., Impact of quantum computing on cybersecurity",
-    key="topic_input"
-)
-
-# Sidebar configuration
+# --------------------------------------------------
+# 4. Sidebar configuration
+# --------------------------------------------------
 with st.sidebar:
     st.header("⚙️ Configuration")
+
     max_iterations = st.slider(
-        "Max Workflow Iterations",
+        "Maximum workflow steps",
         min_value=5,
         max_value=25,
         value=15,
-        help="Maximum number of agent interactions before auto-stop"
+        help="Limits the LangGraph workflow execution.",
     )
 
     st.divider()
-    st.subheader("📋 How it works")
-    st.markdown("""
-    1. **Supervisor** routes the task
-    2. **Researcher** pulls live web data
-    3. **Writer** drafts the report
-    4. **Critiquer** reviews across 5 dimensions
-    5. Loop repeats until APPROVED or 3 revisions
-    """)
+
+    st.subheader("How it works")
+
+    st.markdown(
+        """
+        1. **Supervisor:** routes tasks.
+        2. **Researcher:** gathers web information.
+        3. **Writer:** creates the report.
+        4. **Critiquer:** evaluates the draft.
+        5. **Revision:** improves the report when needed.
+        """
+    )
 
     st.divider()
-    st.subheader("👨‍💻 About")
-    st.markdown("""
-    Built by **Amit Kumar**
-    MSc Data Science — University of Westminster
 
-    Stack: LangGraph · LangChain · Tavily · Together AI · Streamlit
+    st.caption(
+        "Built with Streamlit, LangGraph, LangChain, "
+        "Groq and DuckDuckGo."
+    )
 
-    [![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue)](https://www.linkedin.com/in/amitkumar1454/)
-    [![GitHub](https://img.shields.io/badge/GitHub-View_Code-black)](https://github.com/ak1454789)
-    """)
 
-# Start button
-if st.button("🚀 Start Research", type="primary", use_container_width=True):
-    if not topic:
-        st.error("⚠️ Please enter a research topic.")
+# --------------------------------------------------
+# 5. Research input
+# --------------------------------------------------
+st.header("🔍 Start your research")
+
+topic = st.text_input(
+    "Research topic",
+    placeholder="e.g. Impact of generative AI on software engineering",
+    max_chars=500,
+)
+
+start_research = st.button(
+    "🚀 Start Research",
+    type="primary",
+    use_container_width=True,
+)
+
+
+# --------------------------------------------------
+# 6. Run the agent workflow
+# --------------------------------------------------
+if start_research:
+    if not topic.strip():
+        st.warning("Please enter a research topic.")
+
     else:
-        # Define the initial state
         initial_state = {
-            "main_task": topic,
+            "main_task": topic.strip(),
             "research_findings": [],
             "draft": "",
             "critique_notes": "",
             "revision_number": 0,
             "next_step": "",
-            "current_sub_task": ""
+            "current_sub_task": "",
         }
-        
-        # Configuration
-        config = {"recursion_limit": max_iterations}
-        
-        st.info("🤖 Agents are starting their work...")
-        
-        # Create containers for live updates
-        progress_bar = st.progress(0)
-        status_placeholder = st.empty()
-        
-        # Container for step-by-step progress
-        progress_container = st.container()
-        
-        final_state = None
+
+        config = {
+            "recursion_limit": 25,
+        }
+
+        accumulated_state = initial_state.copy()
         step_count = 0
-        all_states = []  # Keep track of all states
-        
+        error_occurred = False
+
+        progress_bar = st.progress(0)
+        status = st.empty()
+        activity = st.container()
+
         try:
-            # Stream the graph execution
-            with progress_container:
-                st.subheader("🔄 Agent Activity Log")
-                
-                for step in app.stream(initial_state, config=config):
-                    step_count += 1
-                    progress_bar.progress(min(step_count / max_iterations, 1.0))
-                    
-                    # Get node name and output
-                    node_name = list(step.keys())[0]
-                    node_output = step[node_name]
-                    
-                    # Store the complete state
-                    all_states.append((node_name, node_output))
-                    final_state = node_output  # Keep updating final state
-                    
-                    # Display node output with expandable previews
-                    with st.container():
-                        col1, col2 = st.columns([3, 1])
-                        
-                        with col1:
-                            st.markdown(f"### 🤖 Agent: `{node_name.upper()}`")
-                        
-                        with col2:
-                            st.caption(f"Step {step_count}")
-                        
+            status.info(
+                "🤖 AI agents are starting the research..."
+            )
+
+            with activity:
+                st.subheader("📋 Agent Activity Log")
+
+                for update in research_graph.stream(
+                    initial_state,
+                    config=config,
+                    stream_mode="updates",
+                ):
+                    for node_name, node_output in update.items():
+                        if not isinstance(node_output, dict):
+                            continue
+
+                        step_count += 1
+                        accumulated_state.update(node_output)
+
+                        progress_bar.progress(
+                            min(step_count / max_iterations, 1.0)
+                        )
+
+                        st.markdown(
+                            f"### 🤖 {node_name.replace('_', ' ').title()}"
+                        )
+                        st.caption(f"Workflow step {step_count}")
+
+                        # Supervisor output
                         if node_name == "supervisor":
-                            next_step = node_output.get('next_step', 'N/A')
-                            task = node_output.get('current_sub_task', 'N/A')
-                            st.markdown(f"**Decision:** {next_step}")
-                            st.markdown(f"**Task:** {task}")
-                        
+                            st.write(
+                                "**Next step:**",
+                                node_output.get(
+                                    "next_step", "Not specified"
+                                ),
+                            )
+
+                            st.write(
+                                "**Current task:**",
+                                node_output.get(
+                                    "current_sub_task", "Not specified"
+                                ),
+                            )
+
+                        # Researcher output
                         elif node_name == "researcher":
-                            findings = node_output.get('research_findings', [])
+                            findings = accumulated_state.get(
+                                "research_findings", []
+                            )
+
                             if findings:
                                 latest = findings[-1]
-                                st.success("✓ Research completed")
-                                
-                                # Preview with "Show More" button
-                                preview_length = 300
-                                if len(latest) > preview_length:
-                                    st.markdown("**Research Preview:**")
-                                    st.info(latest[:preview_length] + "...")
-                                    
-                                    # Unique key for each expander
-                                    with st.expander(f"📖 Show Full Research (Step {step_count})"):
-                                        st.markdown(latest)
-                                else:
-                                    st.markdown("**Research:**")
-                                    st.info(latest)
-                        
-                        elif node_name == "writer":
-                            draft = node_output.get('draft', '')
-                            revision = node_output.get('revision_number', 0)
-                            st.success(f"✓ Draft {revision} generated ({len(draft)} chars)")
-                            
-                            # Preview with "Show More" button
-                            preview_length = 400
-                            if len(draft) > preview_length:
-                                st.markdown("**Draft Preview:**")
-                                st.info(draft[:preview_length] + "...")
-                                
-                                # Unique key for each expander
-                                with st.expander(f"📖 Show Full Draft (Step {step_count})"):
-                                    st.markdown(draft)
-                            else:
-                                st.markdown("**Draft:**")
-                                st.info(draft)
-                        
-                        elif node_name == "critiquer":
-                            critique = node_output.get('critique_notes', '')
-                            if "APPROVED" in critique.upper():
-                                st.success("✅ Draft APPROVED!")
-                            else:
-                                st.warning("📝 Revisions requested")
-                            
-                            # Preview with "Show More" button
-                            preview_length = 300
-                            if len(critique) > preview_length:
-                                st.markdown("**Critique Preview:**")
-                                st.info(critique[:preview_length] + "...")
-                                
-                                # Unique key for each expander
-                                with st.expander(f"📖 Show Full Critique (Step {step_count})"):
-                                    st.markdown(critique)
-                            else:
-                                st.markdown("**Critique:**")
-                                st.info(critique)
-                        
-                        st.divider()
-                    
-                    time.sleep(0.3)
-            
-            # Update status when done
-            status_placeholder.success("✅ Research Complete!")
-            progress_bar.progress(1.0)
-            
-            # Debug: Print final state info
-            print(f"Final state type: {type(final_state)}")
-            print(f"Final state keys: {final_state.keys() if isinstance(final_state, dict) else 'Not a dict'}")
-            print(f"Draft exists: {bool(final_state.get('draft') if isinstance(final_state, dict) else False)}")
-            print(f"Draft length: {len(final_state.get('draft', '')) if isinstance(final_state, dict) else 0}")
-            
-        except Exception as e:
-            status_placeholder.error("❌ Error occurred")
-            st.error(f"An error occurred: {str(e)}")
-            st.exception(e)
-            final_state = None
-        
-        # Display final report - IMPROVED LOGIC
-        st.divider()
-        
-        # Try to get the draft from final_state
-        final_draft = None
-        if final_state and isinstance(final_state, dict):
-            final_draft = final_state.get("draft", "")
-        
-        # If no draft in final_state, search through all states
-        if not final_draft or len(final_draft.strip()) < 50:
-            print("Searching for draft in all states...")
-            for node_name, state in reversed(all_states):
-                if isinstance(state, dict) and state.get("draft"):
-                    draft_candidate = state.get("draft", "")
-                    if len(draft_candidate.strip()) > 50:
-                        final_draft = draft_candidate
-                        final_state = state
-                        print(f"Found draft in {node_name} state")
-                        break
-        
-        if final_draft and len(final_draft.strip()) > 50:
-            st.header("📄 Final Research Report")
-            
-            # Display report in a nice container
-            with st.container():
-                st.markdown(final_draft)
-            
-            st.divider()
-            
-            # Display metadata
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.subheader("📊 Report Statistics")
-                revision_count = final_state.get("revision_number", 0) if isinstance(final_state, dict) else 0
-                research_count = len(final_state.get("research_findings", [])) if isinstance(final_state, dict) else 0
-                word_count = len(final_draft.split())
-                
-                st.metric("Revisions", revision_count)
-                st.metric("Research Sources", research_count)
-                st.metric("Word Count", word_count)
-                st.metric("Character Count", len(final_draft))
-            
-            with col2:
-                st.subheader("🔍 Research Findings")
-                if isinstance(final_state, dict) and final_state.get("research_findings"):
-                    # Use expander here (safe, outside of workflow)
-                    with st.expander("View all research data", expanded=False):
-                        for idx, finding in enumerate(final_state.get("research_findings", []), 1):
-                            st.markdown(f"**Finding {idx}:**")
-                            st.write(finding)
-                            if idx < len(final_state.get("research_findings", [])):
-                                st.divider()
-                else:
-                    st.info("No research findings available")
-            
-            # Download button
-            st.download_button(
-                label="📥 Download Report",
-                data=final_draft,
-                file_name=f"research_report_{topic.replace(' ', '_')}.txt",
-                mime="text/plain",
-                use_container_width=True
-            )
-        else:
-            st.error("❌ No report was generated. Please try again.")
-            if final_state:
-                with st.expander("🔍 Debug: View Final State"):
-                    st.json(final_state if isinstance(final_state, dict) else {"error": "State is not a dictionary"})
 
-# Footer
+                                if isinstance(latest, str):
+                                    st.success(
+                                        "Research findings received"
+                                    )
+
+                                    with st.expander(
+                                        "View latest research findings"
+                                    ):
+                                        st.markdown(latest)
+
+                        # Writer output
+                        elif node_name == "writer":
+                            draft = accumulated_state.get("draft", "")
+
+                            if draft:
+                                st.success(
+                                    f"Draft updated: {len(draft)} characters"
+                                )
+
+                                with st.expander(
+                                    "Preview current draft"
+                                ):
+                                    st.markdown(draft[:5000])
+
+                        # Critiquer output
+                        elif node_name == "critiquer":
+                            critique = accumulated_state.get(
+                                "critique_notes", ""
+                            )
+
+                            if isinstance(critique, str) and critique:
+                                if "APPROVED" in critique.upper():
+                                    st.success(
+                                        "Draft approved by the critiquer"
+                                    )
+                                else:
+                                    st.warning("Critique received")
+
+                                with st.expander("View critique"):
+                                    st.markdown(critique)
+
+                        st.divider()
+                        time.sleep(0.15)
+
+            progress_bar.progress(1.0)
+            status.success("✅ Workflow execution finished.")
+
+        except Exception as exc:
+            error_occurred = True
+
+            status.error(
+                "❌ The research workflow encountered an error."
+            )
+
+            st.error(f"{type(exc).__name__}: {exc}")
+            st.exception(exc)
+
+        # ------------------------------------------
+        # 7. Display final report
+        # ------------------------------------------
+        final_draft = accumulated_state.get("draft", "")
+
+        if (
+            isinstance(final_draft, str)
+            and len(final_draft.strip()) > 50
+        ):
+            st.divider()
+            st.header("📄 Research Report")
+            st.markdown(final_draft)
+
+            findings = accumulated_state.get(
+                "research_findings", []
+            )
+
+            if not isinstance(findings, list):
+                findings = []
+
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.metric(
+                    "Word count",
+                    len(final_draft.split()),
+                )
+
+            with col2:
+                st.metric(
+                    "Research findings",
+                    len(findings),
+                )
+
+            with col3:
+                st.metric(
+                    "Revision number",
+                    accumulated_state.get("revision_number", 0),
+                )
+
+            with st.expander("View all research findings"):
+                if findings:
+                    for index, finding in enumerate(
+                        findings, start=1
+                    ):
+                        st.markdown(f"**Finding {index}**")
+                        st.write(finding)
+                        st.divider()
+                else:
+                    st.info(
+                        "No research findings were returned."
+                    )
+
+            safe_topic = re.sub(
+                r"[^a-zA-Z0-9_-]+",
+                "_",
+                topic.strip(),
+            ).strip("_")[:60]
+
+            st.download_button(
+                label="📥 Download research report",
+                data=final_draft,
+                file_name=(
+                    f"research_report_{safe_topic or 'report'}.md"
+                ),
+                mime="text/markdown",
+                use_container_width=True,
+            )
+
+        elif not error_occurred:
+            st.warning(
+                "The workflow finished, but no complete report "
+                "was found. Check graph.py and the agent outputs."
+            )
+
+
+# --------------------------------------------------
+# 8. Footer
+# --------------------------------------------------
 st.divider()
-st.markdown("""
-<div style='text-align: center; color: gray;'>
-    <p>Built by <a href="https://www.linkedin.com/in/amitkumar1454/" target="_blank">Amit Kumar</a> &nbsp;|&nbsp; Powered by LangGraph · LangChain · Together AI · Tavily</p>
-</div>
-""", unsafe_allow_html=True)
+st.caption(
+    "ResearchFlow AI · Multi-agent research and report generation"
+)
