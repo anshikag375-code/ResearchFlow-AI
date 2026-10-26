@@ -35,7 +35,7 @@ if not os.getenv("GROQ_API_KEY"):
 llm = ChatGroq(
     model="openai/gpt-oss-120b",
     temperature=0.3,
-    max_tokens=4096,
+    max_tokens=2048,
 )
 
 # --------------------------------------------------
@@ -256,23 +256,46 @@ Search results:
 # 7. Writer
 # --------------------------------------------------
 
+# --------------------------------------------------
+# 7. Writer
+# --------------------------------------------------
+
 def create_writer_chain():
-    """Create or revise the research report."""
+    """Create or revise the research report with bounded prompt size."""
+
+    MAX_RESEARCH_CHARS = 4500
+    MAX_DRAFT_CHARS = 4500
+    MAX_CRITIQUE_CHARS = 1200
 
     def writer_invoke(state):
         research = state.get("research_findings", [])
-        research_text = "\n\n".join(research) if research else "No research available."
+
+        if isinstance(research, list):
+            research_text = "\n\n".join(str(item) for item in research)
+        else:
+            research_text = str(research)
+
+        draft = str(state.get("draft", "") or "")
+        critique = str(state.get("critique_notes", "") or "")
+        main_task = str(state.get("main_task", "") or "")
+
+        # Keep the prompt small enough for the model's token limit.
+        research_text = research_text[:MAX_RESEARCH_CHARS]
+        draft = draft[:MAX_DRAFT_CHARS]
+        critique = critique[:MAX_CRITIQUE_CHARS]
 
         prompt = writer_prompt_template.format(
-            main_task=state.get("main_task", ""),
+            main_task=main_task,
             research_findings=research_text,
-            draft=state.get("draft", ""),
-            critique_notes=state.get("critique_notes", ""),
+            draft=draft,
+            critique_notes=critique,
         )
 
         try:
-            response = _call_llm(llm, prompt)
-            content = _response_text(response)
+            # Reduce the maximum response size for this call.
+            writer_llm = llm.bind(max_tokens=2048)
+            response = _call_llm(writer_llm, prompt)
+            content = _response_text(response).strip()
 
             return content or "Draft in progress..."
 
